@@ -60,11 +60,17 @@ async def serve_dashboard():
         label { font-size: 13px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
         input { background: #0f172a; border: 1px solid #475569; border-radius: 8px; padding: 12px 16px; color: #fff; font-size: 15px; outline: none; }
         input:focus { border-color: #38bdf8; }
-        .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
         button { background: #0284c7; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: 0.2s; margin-top: 8px; width: 100%; }
         button:hover { background: #0369a1; }
         button:disabled { background: #475569; cursor: not-allowed; }
+        
+        .btn-secondary { background: #334155; margin-top: 24px; display: none; }
+        .btn-secondary:hover { background: #475569; }
+        
         #status-area { margin-top: 20px; font-size: 14px; text-align: center; color: #94a3b8; display: none; }
+        #end-message { margin-top: 24px; font-size: 14px; text-align: center; color: #10b981; display: none; font-weight: 600; }
+        
         .badge-box { margin-top: 24px; padding: 20px; border-radius: 10px; display: none; align-items: center; justify-content: space-between; }
         .badge-found { background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #34d399; }
         .badge-missing { background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #f87171; }
@@ -88,11 +94,11 @@ async def serve_dashboard():
           <div class="grid">
             <div class="form-group">
               <label>Search Keyword</label>
-              <input type="text" id="keyword" placeholder="search here" value="" onkeydown="if(event.key === 'Enter') runSearch()" />
+              <input type="text" id="keyword" placeholder="search here" onkeydown="if(event.key === 'Enter') runSearch()" />
             </div>
             <div class="form-group">
-              <label>Target Domain</label>
-              <input type="text" id="target_domain" placeholder="e.g. outletmallofindia.com" value="" onkeydown="if(event.key === 'Enter') runSearch()" />
+              <label>Target Word(s)</label>
+              <input type="text" id="target_words" placeholder="e.g. Outlet Mall of India, Bhumi World" onkeydown="if(event.key === 'Enter') runSearch()" />
             </div>
           </div>
 
@@ -101,24 +107,39 @@ async def serve_dashboard():
 
           <div id="rank-badge" class="badge-box">
             <div>
-              <div style="font-size: 13px; text-transform: uppercase; font-weight: 600;" id="badge-title">SEO Position</div>
+              <div style="font-size: 13px; text-transform: uppercase; font-weight: 600;" id="badge-title">Top Position</div>
               <div style="font-size: 14px; color: #cbd5e1;" id="badge-desc"></div>
             </div>
             <div class="rank-number" id="rank-val">#--</div>
           </div>
 
           <div class="results-list" id="results-container"></div>
+          
+          <button id="load-more-btn" class="btn-secondary" onclick="renderNextPage()">Show 10 More Results</button>
+          <div id="end-message">All possible SEO search results displayed.</div>
         </div>
       </div>
 
       <script>
+        // Global variables to handle pagination and tracking
+        let globalResults = [];
+        let currentTargetWords = [];
+        let displayedCount = 0;
+        const PAGE_SIZE = 10;
+
         async function runSearch() {
           const keyword = document.getElementById('keyword').value.trim();
-          const targetDomain = document.getElementById('target_domain').value.trim().toLowerCase();
+          const rawTargetWords = document.getElementById('target_words').value;
+          
+          // Split by comma, trim spaces, convert to lowercase, and remove empty entries
+          currentTargetWords = rawTargetWords.split(',').map(w => w.trim().toLowerCase()).filter(w => w.length > 0);
+          
           const btn = document.getElementById('search-btn');
           const status = document.getElementById('status-area');
           const resultsContainer = document.getElementById('results-container');
           const rankBadge = document.getElementById('rank-badge');
+          const loadMoreBtn = document.getElementById('load-more-btn');
+          const endMsg = document.getElementById('end-message');
 
           if (!keyword) return;
 
@@ -127,6 +148,12 @@ async def serve_dashboard():
           status.innerText = "Queueing background task in Redis...";
           resultsContainer.innerHTML = '';
           rankBadge.style.display = 'none';
+          loadMoreBtn.style.display = 'none';
+          endMsg.style.display = 'none';
+          
+          // Reset pagination state
+          globalResults = [];
+          displayedCount = 0;
 
           try {
             const postRes = await fetch('/api/v1/search', {
@@ -147,7 +174,12 @@ async def serve_dashboard():
                 clearInterval(pollInterval);
                 btn.disabled = false;
                 status.style.display = 'none';
-                renderData(jobData.data.results, targetDomain);
+                
+                // Store results globally and render first page
+                globalResults = jobData.data.results || [];
+                updateTopBadge();
+                renderNextPage();
+                
               } else if (jobData.status === 'Failed') {
                 clearInterval(pollInterval);
                 btn.disabled = false;
@@ -161,34 +193,63 @@ async def serve_dashboard():
           }
         }
 
-        function renderData(results, targetDomain) {
-          const resultsContainer = document.getElementById('results-container');
+        function updateTopBadge() {
           const rankBadge = document.getElementById('rank-badge');
           const rankVal = document.getElementById('rank-val');
           const badgeDesc = document.getElementById('badge-desc');
+          
+          if (currentTargetWords.length === 0) {
+            rankBadge.style.display = 'none';
+            return;
+          }
 
-          let matchedRank = null;
-          resultsContainer.innerHTML = '';
-
-          results.forEach((item, index) => {
-            const currentRank = index + 1;
+          let bestRank = null;
+          
+          // Find the highest ranking match across all results
+          for (let i = 0; i < globalResults.length; i++) {
+            const item = globalResults[i];
             const titleLower = item.title.toLowerCase();
             const domainLower = item.domain.toLowerCase();
             
-            // 1. Check if the result matches the user-inputted Target Domain (for the badge)
-            const isTargetMatch = targetDomain && domainLower.includes(targetDomain);
-            if (isTargetMatch && matchedRank === null) {
-              matchedRank = currentRank;
+            // Check if ANY of the target words exist in the title or domain
+            const isMatch = currentTargetWords.some(word => titleLower.includes(word) || domainLower.includes(word));
+            
+            if (isMatch) {
+              bestRank = i + 1;
+              break; 
             }
+          }
 
-            // 2. Automatically highlight rows containing your mall's brand names
-            const autoHighlight = titleLower.includes("outlet mall of india") || 
-                                  titleLower.includes("bhumi world") || 
-                                  domainLower.includes("outletmallofindia") || 
-                                  domainLower.includes("bhumiworld");
-                                  
-            const isHighlight = isTargetMatch || autoHighlight;
+          rankBadge.style.display = 'flex';
+          if (bestRank !== null) {
+            rankBadge.className = 'badge-box badge-found';
+            rankVal.innerText = `#${bestRank}`;
+            badgeDesc.innerText = `Found target match in search results.`;
+          } else {
+            rankBadge.className = 'badge-box badge-missing';
+            rankVal.innerText = 'N/A';
+            badgeDesc.innerText = `No target words ranked within top ${globalResults.length} positions.`;
+          }
+        }
 
+        function renderNextPage() {
+          const container = document.getElementById('results-container');
+          const loadMoreBtn = document.getElementById('load-more-btn');
+          const endMsg = document.getElementById('end-message');
+          
+          // Slice the next 10 items from the total results array
+          const toDisplay = globalResults.slice(displayedCount, displayedCount + PAGE_SIZE);
+          
+          toDisplay.forEach((item, idx) => {
+            const currentRank = displayedCount + idx + 1;
+            const titleLower = item.title.toLowerCase();
+            const domainLower = item.domain.toLowerCase();
+            
+            let isHighlight = false;
+            if (currentTargetWords.length > 0) {
+              isHighlight = currentTargetWords.some(word => titleLower.includes(word) || domainLower.includes(word));
+            }
+            
             const card = document.createElement('div');
             card.className = `result-item ${isHighlight ? 'highlight' : ''}`;
             card.innerHTML = `
@@ -198,20 +259,21 @@ async def serve_dashboard():
                 <div class="domain">${item.domain}</div>
               </div>
             `;
-            resultsContainer.appendChild(card);
+            container.appendChild(card);
           });
-
-          if (targetDomain) {
-            rankBadge.style.display = 'flex';
-            if (matchedRank) {
-              rankBadge.className = 'badge-box badge-found';
-              rankVal.innerText = `#${matchedRank}`;
-              badgeDesc.innerText = `Found "${targetDomain}" in search results.`;
-            } else {
-              rankBadge.className = 'badge-box badge-missing';
-              rankVal.innerText = 'N/A';
-              badgeDesc.innerText = `Domain not ranked within top ${results.length} positions.`;
+          
+          // Update the counter
+          displayedCount += toDisplay.length;
+          
+          // Toggle "Load More" button vs "End Message" based on remaining results
+          if (displayedCount >= globalResults.length) {
+            loadMoreBtn.style.display = 'none';
+            if (globalResults.length > 0) {
+              endMsg.style.display = 'block';
             }
+          } else {
+            loadMoreBtn.style.display = 'block';
+            endMsg.style.display = 'none';
           }
         }
       </script>
