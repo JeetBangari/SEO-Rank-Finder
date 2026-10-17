@@ -2,7 +2,7 @@ fastapi
 uvicorn
 celery
 redis
-duckduckgo-search
+requests
+beautifulsoup4
 pydantic
 pydantic-settings
-requests
