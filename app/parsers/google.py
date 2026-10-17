@@ -18,7 +18,7 @@ class GoogleParser:
             href = a_tag["href"]
             title = a_tag.get_text(strip=True)
             
-            # Clean DuckDuckGo redirect wrappers if present (//duckduckgo.com/l/?uddg=...)
+            # Clean DuckDuckGo redirect wrappers if present
             if "duckduckgo.com/l/?uddg=" in href:
                 parsed_url = urllib.parse.urlparse(href)
                 query_params = urllib.parse.parse_qs(parsed_url.query)
