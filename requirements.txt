@@ -2,7 +2,9 @@ fastapi
 uvicorn
 celery
 redis
+ddgs
 requests
 beautifulsoup4
+curl_cffi
 pydantic
 pydantic-settings
