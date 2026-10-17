@@ -1,9 +1,8 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-celery>=5.3.6
-redis>=5.0.3
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
-curl_cffi>=0.6.2
-beautifulsoup4>=4.12.3
-lxml>=5.1.0
+fastapi
+uvicorn
+celery
+redis
+beautifulsoup4
+requests
+curl_cffi
+pydantic
