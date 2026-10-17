@@ -57,6 +57,7 @@ async def serve_dashboard():
         .card { background: #1e293b; border-radius: 12px; padding: 28px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); border: 1px solid #334155; }
         h1 { margin-top: 0; font-size: 24px; color: #38bdf8; }
         .form-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+        .full-width { grid-column: 1 / -1; }
         label { font-size: 13px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
         input { background: #0f172a; border: 1px solid #475569; border-radius: 8px; padding: 12px 16px; color: #fff; font-size: 15px; outline: none; }
         input:focus { border-color: #38bdf8; }
@@ -100,6 +101,10 @@ async def serve_dashboard():
               <label>Target Word(s)</label>
               <input type="text" id="target_words" placeholder="e.g. Outlet Mall of India, Bhumi World" onkeydown="if(event.key === 'Enter') runSearch()" />
             </div>
+            <div class="form-group full-width">
+              <label>Proxy URL (Optional - To bypass IP blocks)</label>
+              <input type="text" id="proxy" placeholder="http://user:password@ip:port" onkeydown="if(event.key === 'Enter') runSearch()" />
+            </div>
           </div>
 
           <button id="search-btn" onclick="runSearch()">Check SEO Ranking</button>
@@ -121,7 +126,6 @@ async def serve_dashboard():
       </div>
 
       <script>
-        // Global variables to handle pagination and tracking
         let globalResults = [];
         let currentTargetWords = [];
         let displayedCount = 0;
@@ -130,8 +134,8 @@ async def serve_dashboard():
         async function runSearch() {
           const keyword = document.getElementById('keyword').value.trim();
           const rawTargetWords = document.getElementById('target_words').value;
+          const proxy = document.getElementById('proxy').value.trim();
           
-          // Split by comma, trim spaces, convert to lowercase, and remove empty entries
           currentTargetWords = rawTargetWords.split(',').map(w => w.trim().toLowerCase()).filter(w => w.length > 0);
           
           const btn = document.getElementById('search-btn');
@@ -145,13 +149,13 @@ async def serve_dashboard():
 
           btn.disabled = true;
           status.style.display = 'block';
+          status.style.color = '#94a3b8';
           status.innerText = "Queueing background task in Redis...";
           resultsContainer.innerHTML = '';
           rankBadge.style.display = 'none';
           loadMoreBtn.style.display = 'none';
           endMsg.style.display = 'none';
           
-          // Reset pagination state
           globalResults = [];
           displayedCount = 0;
 
@@ -159,7 +163,7 @@ async def serve_dashboard():
             const postRes = await fetch('/api/v1/search', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ keyword: keyword })
+              body: JSON.stringify({ keyword: keyword, proxy: proxy || null })
             });
             const postData = await postRes.json();
             const jobId = postData.job_id;
@@ -175,7 +179,6 @@ async def serve_dashboard():
                 btn.disabled = false;
                 status.style.display = 'none';
                 
-                // Store results globally and render first page
                 globalResults = jobData.data.results || [];
                 updateTopBadge();
                 renderNextPage();
@@ -183,12 +186,14 @@ async def serve_dashboard():
               } else if (jobData.status === 'Failed') {
                 clearInterval(pollInterval);
                 btn.disabled = false;
-                status.innerText = "Task failed in background worker.";
+                status.style.color = '#ef4444';
+                status.innerText = "Task failed: " + (jobData.error || "Unknown error in background worker.");
               }
             }, 1000);
 
           } catch (err) {
             btn.disabled = false;
+            status.style.color = '#ef4444';
             status.innerText = "Error connecting to API.";
           }
         }
@@ -205,13 +210,11 @@ async def serve_dashboard():
 
           let bestRank = null;
           
-          // Find the highest ranking match across all results
           for (let i = 0; i < globalResults.length; i++) {
             const item = globalResults[i];
             const titleLower = item.title.toLowerCase();
             const domainLower = item.domain.toLowerCase();
             
-            // Check if ANY of the target words exist in the title or domain
             const isMatch = currentTargetWords.some(word => titleLower.includes(word) || domainLower.includes(word));
             
             if (isMatch) {
@@ -237,7 +240,6 @@ async def serve_dashboard():
           const loadMoreBtn = document.getElementById('load-more-btn');
           const endMsg = document.getElementById('end-message');
           
-          // Slice the next 10 items from the total results array
           const toDisplay = globalResults.slice(displayedCount, displayedCount + PAGE_SIZE);
           
           toDisplay.forEach((item, idx) => {
@@ -262,10 +264,8 @@ async def serve_dashboard():
             container.appendChild(card);
           });
           
-          // Update the counter
           displayedCount += toDisplay.length;
           
-          // Toggle "Load More" button vs "End Message" based on remaining results
           if (displayedCount >= globalResults.length) {
             loadMoreBtn.style.display = 'none';
             if (globalResults.length > 0) {
