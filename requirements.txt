@@ -5,3 +5,4 @@ redis
 duckduckgo-search
 pydantic
 pydantic-settings
+requests
