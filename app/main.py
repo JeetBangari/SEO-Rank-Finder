@@ -9,12 +9,10 @@ from app.tasks import scrape_keyword_task
 
 app = FastAPI(title="SEO Rank Finder API")
 
-# --- 1. Pydantic Models ---
 class SearchRequest(BaseModel):
     keyword: str
     proxy: Optional[str] = None
 
-# --- 2. API Endpoints ---
 @app.post("/api/v1/search")
 async def create_search_task(request: SearchRequest):
     task = scrape_keyword_task.delay(request.keyword, request.proxy)
@@ -40,7 +38,6 @@ async def get_job_status(job_id: str):
             "error": str(task.result)
         }
 
-# --- 3. Web Dashboard ---
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
     return """
@@ -57,7 +54,6 @@ async def serve_dashboard():
         .card { background: #1e293b; border-radius: 12px; padding: 28px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); border: 1px solid #334155; }
         h1 { margin-top: 0; font-size: 24px; color: #38bdf8; }
         .form-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-        .full-width { grid-column: 1 / -1; }
         label { font-size: 13px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
         input { background: #0f172a; border: 1px solid #475569; border-radius: 8px; padding: 12px 16px; color: #fff; font-size: 15px; outline: none; }
         input:focus { border-color: #38bdf8; }
@@ -101,10 +97,6 @@ async def serve_dashboard():
               <label>Target Word(s)</label>
               <input type="text" id="target_words" placeholder="e.g. Outlet Mall of India, Bhumi World" onkeydown="if(event.key === 'Enter') runSearch()" />
             </div>
-            <div class="form-group full-width">
-              <label>Proxy URL (Optional - To bypass IP blocks)</label>
-              <input type="text" id="proxy" placeholder="http://user:password@ip:port" onkeydown="if(event.key === 'Enter') runSearch()" />
-            </div>
           </div>
 
           <button id="search-btn" onclick="runSearch()">Check SEO Ranking</button>
@@ -134,7 +126,6 @@ async def serve_dashboard():
         async function runSearch() {
           const keyword = document.getElementById('keyword').value.trim();
           const rawTargetWords = document.getElementById('target_words').value;
-          const proxy = document.getElementById('proxy').value.trim();
           
           currentTargetWords = rawTargetWords.split(',').map(w => w.trim().toLowerCase()).filter(w => w.length > 0);
           
@@ -163,7 +154,7 @@ async def serve_dashboard():
             const postRes = await fetch('/api/v1/search', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ keyword: keyword, proxy: proxy || null })
+              body: JSON.stringify({ keyword: keyword })
             });
             const postData = await postRes.json();
             const jobId = postData.job_id;
