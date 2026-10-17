@@ -1,28 +1,34 @@
 from app.core.celery_app import celery_app
 from app.parsers.google import GoogleParser
 from curl_cffi import requests
-import urllib.parse
 
 @celery_app.task(bind=True, max_retries=3)
 def scrape_keyword_task(self, keyword: str, proxy: str = None):
-    encoded_query = urllib.parse.quote_plus(keyword)
-    # Target DuckDuckGo HTML Lite version (lightweight, zero blocks)
-    target_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+    # Target the HTML endpoint but prepare to use POST instead of GET
+    target_url = "https://html.duckduckgo.com/html/"
     
+    # Advanced headers to perfectly mimic a real Chrome browser submitting a form
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://html.duckduckgo.com",
+        "Referer": "https://html.duckduckgo.com/",
     }
     
+    # Send the search query securely in the request body, not the URL
+    data = {"q": keyword}
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     try:
-        response = requests.get(
+        # Use POST and upgrade the TLS fingerprint to a newer Chrome version
+        response = requests.post(
             target_url,
             headers=headers,
+            data=data,
             proxies=proxies,
-            impersonate="chrome120",
+            impersonate="chrome124", 
             timeout=15
         )
         
