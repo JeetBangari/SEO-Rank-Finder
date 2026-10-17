@@ -1,82 +1,132 @@
 from app.core.celery_app import celery_app
+from curl_cffi import requests as cffi_requests
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 import urllib.parse
 import re
 
-# Ordered list of clean search engines (excludes Bing/Yahoo to prevent fake honeypot results)
-SEARCH_BACKENDS = ["duckduckgo", "brave", "google", "startpage"]
+def clean_title_text(raw_title: str) -> str:
+    """Removes glued breadcrumb URLs and normalizes spacing in titles."""
+    # Remove leading domain+URL patterns like 'domain.comhttps://...'
+    cleaned = re.sub(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\s*(https?://[^\s]+)?", "", raw_title)
+    # If breadcrumb arrows remain, take the actual title after the last arrow
+    if " › " in cleaned:
+        cleaned = cleaned.split(" › ")[-1]
+    if " > " in cleaned:
+        cleaned = cleaned.split(" > ")[-1]
+    return " ".join(cleaned.split()).strip()
 
-@celery_app.task(bind=True, max_retries=3)
-def scrape_keyword_task(self, keyword: str, proxy: str = None):
-    # Extract meaningful words from the keyword to verify result relevance
+def is_relevant_serp(results: list, keyword: str) -> bool:
+    """Verifies the search engine returned results matching the query (blocks bot honeypots)."""
+    if not results:
+        return False
     stop_words = {"the", "and", "for", "near", "from", "with", "best", "top", "in", "of", "to"}
-    query_tokens = [
-        w.lower() for w in re.findall(r"\w+", keyword)
-        if len(w) >= 3 and w.lower() not in stop_words
+    tokens = [w.lower() for w in re.findall(r"\w+", keyword) if len(w) >= 3 and w.lower() not in stop_words]
+    if not tokens:
+        return True
+    matches = sum(
+        1 for r in results
+        if any(t in f"{r['title']} {r['url']}".lower() for t in tokens)
+    )
+    return matches > 0
+
+@celery_app.task(bind=True, max_retries=2)
+def scrape_keyword_task(self, keyword: str, proxy: str = None):
+    encoded_query = urllib.parse.quote_plus(keyword)
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    # --- LAYER 1: JINA READER PROXY -> DUCKDUCKGO INDIA (Bypasses Render IP blocks) ---
+    try:
+        ddg_target = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=in-en"
+        jina_url = f"https://r.jina.ai/{ddg_target}"
+        jina_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "X-Return-Format": "html",
+        }
+        resp = cffi_requests.get(jina_url, headers=jina_headers, proxies=proxies, impersonate="chrome120", timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = []
+            for a_tag in soup.select(".result__a"):
+                href = a_tag.get("href", "").strip()
+                title = a_tag.get_text(separator=" ", strip=True)
+                if "duckduckgo.com/l/?uddg=" in href:
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                    href = qs.get("uddg", [href])[0]
+                if href.startswith("http") and title:
+                    domain = urllib.parse.urlparse(href).netloc
+                    if domain and "duckduckgo.com" not in domain and not any(r["url"] == href for r in results):
+                        results.append({"title": clean_title_text(title), "url": href, "domain": domain})
+            if is_relevant_serp(results, keyword):
+                return {"keyword": keyword, "status": "success", "count": len(results), "results": results}
+    except Exception:
+        pass
+
+    # --- LAYER 2: YAHOO INDIA WITH CHROME TLS IMPERSONATION & BREADCRUMB STRIPPING ---
+     Yahoo_urls = [
+        f"https://in.search.yahoo.com/search?p={encoded_query}&vc=in&ei=UTF-8",
+        f"https://search.yahoo.com/search?p={encoded_query}&ei=UTF-8",
     ]
-
-    last_error = None
-
-    for backend_name in SEARCH_BACKENDS:
+    for y_url in Yahoo_urls:
         try:
-            ddgs = DDGS(proxy=proxy, timeout=15)
-            # region="in-en" forces authentic Indian search rankings
-            raw_results = ddgs.text(
-                keyword,
-                region="in-en",
-                safesearch="off",
-                max_results=30,
-                backend=backend_name
-            )
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+            }
+            resp = cffi_requests.get(y_url, headers=headers, proxies=proxies, impersonate="chrome120", timeout=12)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                results = []
+                for comp in soup.select("div.compTitle, h3.title"):
+                    a_tag = comp.find("a") if comp.name != "a" else comp
+                    if not a_tag or not a_tag.get("href"):
+                        continue
+                    href = a_tag["href"].strip()
 
-            if not raw_results:
-                continue
+                    # Remove breadcrumb/URL spans inside the link before reading title text
+                    for junk in a_tag.select("span.d-ib, span.fz-ms, span.tc, cite, div"):
+                        junk.decompose()
 
-            cleaned_results = []
-            relevant_hits = 0
+                    title = clean_title_text(a_tag.get_text(separator=" ", strip=True))
+                    if not title:
+                        continue
 
-            for item in raw_results:
-                href = (item.get("href") or item.get("url") or "").strip()
-                title = (item.get("title") or "").strip()
-                body = (item.get("body") or "").strip()
+                    if "RU=" in href:
+                        match = re.search(r"RU=([^/]+)", href)
+                        if match:
+                            href = urllib.parse.unquote(match.group(1))
 
-                if not href.startswith("http") or not title:
-                    continue
+                    if not href.startswith("http"):
+                        continue
+                    domain = urllib.parse.urlparse(href).netloc
+                    if not domain or "yahoo.com" in domain or "bing.com" in domain:
+                        continue
 
-                # Clean any accidental breadcrumb text if present
-                if " › " in title:
-                    title = title.split(" › ")[-1].strip()
+                    if not any(r["url"] == href for r in results):
+                        results.append({"title": title, "url": href, "domain": domain})
 
-                parsed_domain = urllib.parse.urlparse(href).netloc
-                if not parsed_domain:
-                    continue
-
-                # Check if this result is genuinely related to the searched keyword
-                combined_text = f"{title} {href} {body}".lower()
-                if not query_tokens or any(token in combined_text for token in query_tokens):
-                    relevant_hits += 1
-
-                if not any(r["url"] == href for r in cleaned_results):
-                    cleaned_results.append({
-                        "title": title,
-                        "url": href,
-                        "domain": parsed_domain
-                    })
-
-            # Only accept the results if they pass the relevance check (blocks bot honeypots)
-            if cleaned_results and relevant_hits > 0:
-                return {
-                    "keyword": keyword,
-                    "status": "success",
-                    "count": len(cleaned_results),
-                    "results": cleaned_results
-                }
-
-        except Exception as e:
-            last_error = str(e)
+                if is_relevant_serp(results, keyword):
+                    return {"keyword": keyword, "status": "success", "count": len(results), "results": results}
+        except Exception:
             continue
 
-    raise self.retry(
-        exc=Exception(f"Search engines temporarily unreachable. Last error: {last_error}"),
-        countdown=5
-    )
+    # --- LAYER 3: DDGS METASEARCH FALLBACK (Yahoo / Mojeek / Auto) ---
+    for backend_opt in ["yahoo", "mojeek", "auto"]:
+        try:
+            raw_ddgs = DDGS(proxy=proxy, timeout=12).text(
+                keyword, region="in-en", safesearch="off", max_results=25, backend=backend_opt
+            )
+            results = []
+            for item in (raw_ddgs or []):
+                href = (item.get("href") or item.get("url") or "").strip()
+                title = clean_title_text(item.get("title") or "")
+                if href.startswith("http") and title:
+                    domain = urllib.parse.urlparse(href).netloc
+                    if domain and not any(r["url"] == href for r in results):
+                        results.append({"title": title, "url": href, "domain": domain})
+            if is_relevant_serp(results, keyword):
+                return {"keyword": keyword, "status": "success", "count": len(results), "results": results}
+        except Exception:
+            continue
+
+    raise self.retry(exc=Exception("Search engines rate-limited the request. Retrying..."), countdown=3)
