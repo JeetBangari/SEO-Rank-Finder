@@ -1,27 +1,59 @@
 from app.core.celery_app import celery_app
-from duckduckgo_search import DDGS
 import urllib.parse
+import requests
+from bs4 import BeautifulSoup
 
 @celery_app.task(bind=True, max_retries=3)
 def scrape_keyword_task(self, keyword: str, proxy: str = None):
+    encoded_query = urllib.parse.quote_plus(keyword)
+    
+    # Yahoo Search is highly resilient to datacenter IPs. n=30 requests 30 results.
+    url = f"https://search.yahoo.com/search?p={encoded_query}&n=30"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    
     try:
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
+        
+        if response.status_code != 200:
+            raise Exception(f"Search failed with status {response.status_code}")
+            
+        soup = BeautifulSoup(response.text, "html.parser")
         results = []
         
-        # DDGS connects directly to the internal API, natively bypassing frontend blocks
-        with DDGS(proxy=proxy) as ddgs:
-            # Fetch up to 30 results to give your pagination plenty of data
-            search_results = list(ddgs.text(keyword, max_results=30))
-            
-            for item in search_results:
-                href = item.get("href")
-                title = item.get("title")
+        # Yahoo places search results inside <h3> tags with the class "title"
+        for h3 in soup.find_all("h3", class_="title"):
+            a_tag = h3.find("a")
+            if a_tag and a_tag.get("href"):
+                href = a_tag["href"]
+                title = a_tag.text.strip()
                 
-                if href and title:
+                # Yahoo wraps links in a tracking URL. We extract the real URL from the "RU=" parameter.
+                if "RU=" in href:
+                    try:
+                        # Split by '/' and find the chunk starting with RU=
+                        ru_chunk = next((chunk for chunk in href.split('/') if chunk.startswith('RU=')), None)
+                        if ru_chunk:
+                            href = urllib.parse.unquote(ru_chunk[3:])
+                    except:
+                        pass
+                        
+                if href.startswith("http") and not any(r["url"] == href for r in results):
                     results.append({
                         "title": title,
                         "url": href,
                         "domain": urllib.parse.urlparse(href).netloc
                     })
+                    
+        # If the search engine somehow returned 0 results, force a retry
+        if len(results) == 0:
+            raise Exception("Search engine returned 0 results. Retrying...")
 
         return {
             "keyword": keyword,
